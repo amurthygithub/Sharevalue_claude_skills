@@ -105,8 +105,16 @@ if [ -f "$LOCK" ]; then
   fi
 fi
 
-# Spawn detached so push proceeds immediately
-( cd "$REPO" && trap 'rm -f "'"$LOCK"'"' EXIT && nohup claude --print --permission-mode bypassPermissions "/agentreview $PR_NUMBER" >"$LOG" 2>&1 ) &
+# Spawn detached so `git push` proceeds immediately.
+#
+# Detach detail: redirect stdin from /dev/null in addition to stdout/stderr so
+# git's pre-push doesn't keep the parent shell alive waiting for descendant fds
+# to close. The earlier `( ... ) &` subshell pattern blocked the foreground
+# push for the full review duration because the subshell waited on the inner
+# `nohup claude` synchronously. Lock-file cleanup happens via the `kill -0`
+# liveness check above on the next push to the same PR.
+nohup claude --print --permission-mode bypassPermissions "/agentreview $PR_NUMBER" \
+  </dev/null >"$LOG" 2>&1 &
 REVIEW_PID=$!
 echo "$REVIEW_PID" > "$LOCK"
 disown 2>/dev/null || true
