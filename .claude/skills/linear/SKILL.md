@@ -1,15 +1,15 @@
 ---
 name: linear
-description: CLI for <TRACKER> ticket operations (create epic / story / task, update status, show, list) — no committed secrets, uses $<TRACKER>_API_KEY from env.
+description: CLI for <TRACKER> ticket operations (create epic / story / task, update status, show, list) — no committed secrets, reads $<TRACKER>_API_KEY from env. The most-replaceable skill in this template — swap the API layer for any tracker.
 argument-hint: <subcommand> <args> — see body
 allowed-tools: Bash, Read, Write
 user-invocable: true
 disable-model-invocation: false
 ---
 
-You are operating `<TRACKER>` via API on behalf of the user. Team key: `<TRACKER_TEAM_KEY>`. Team UUID: `<TRACKER_TEAM_UUID>`. Use `$<TRACKER>_API_KEY` from the env (already set in `~/.zshrc` or equivalent); NEVER hardcode the token in any file or commit.
+You are operating `<TRACKER>` via its API on behalf of the user. Team key: `<TRACKER_TEAM_KEY>`. Team UUID: `<TRACKER_TEAM_UUID>`. Read `$<TRACKER>_API_KEY` from the env (set it in your shell rc, e.g. `~/.zshrc`); NEVER hardcode the token in any file or commit.
 
-This template uses the Linear GraphQL API as the example. Adapt to Jira, GitHub Issues, Notion, or any tracker by replacing the API call layer.
+This template uses a Linear-style GraphQL API as the worked example. It is the most-replaceable skill here: adapt to Jira, GitHub Issues, Notion, or any tracker by swapping the API-call layer (the `<TRACKER>_gql` helper) and the field names — the subcommand contract stays the same.
 
 ## Subcommands
 
@@ -28,19 +28,17 @@ Workflow state UUIDs (Linear-style — replace with your tracker's equivalents):
 
 | Name | UUID placeholder |
 |---|---|
-| Backlog | `<TRACKER_STATE_BACKLOG_UUID>` |
 | Todo | `<TRACKER_STATE_TODO_UUID>` |
 | In Progress | `<TRACKER_STATE_INPROGRESS_UUID>` |
 | In Review | `<TRACKER_STATE_INREVIEW_UUID>` |
 | Done | `<TRACKER_STATE_DONE_UUID>` |
-| Canceled | `<TRACKER_STATE_CANCELED_UUID>` |
 
 If no `--status` given on create, default to `Todo`.
 
 ## Common: send a request
 
 ```bash
-linear_gql() {
+<TRACKER>_gql() {
   local query="$1"
   curl -sS -X POST <TRACKER_API_BASE> \
     -H "Authorization: $<TRACKER>_API_KEY" \
@@ -52,6 +50,8 @@ linear_gql() {
 Always check the response for `.errors` and abort with the message if present.
 
 ## Resolve `<TRACKER_TEAM_KEY>-NNN` → UUID
+
+When a subcommand references a sibling ticket (`--parent`, `--epic`, or `update <id>`), resolve the human identifier to the API UUID first:
 
 ```graphql
 query { issue(id: "<TRACKER_TEAM_KEY>-NNN") { id identifier title state { name id } } }
@@ -79,6 +79,13 @@ mutation {
 }
 ```
 
+To resolve a label name → UUID, query the team's labels once per session and cache in memory. After creation, print:
+
+```
+✅ Created <identifier> "<title>" — <url>
+   Parent: <parent-identifier-or-none>  •  State: <state-name>  •  Labels: <names-or-none>
+```
+
 ## update
 
 Map `status:<name>` to the workflow state UUID via the table above (case-insensitive match). For `parent:<TRACKER_TEAM_KEY>-NNN`, resolve to UUID first.
@@ -97,7 +104,7 @@ mutation {
 }
 ```
 
-Build the `input` dynamically — only include fields the user passed.
+Build the `input` dynamically — only include fields the user passed. Print `✅ Updated <identifier>: <changed-fields>`.
 
 ## show
 
@@ -117,7 +124,7 @@ query {
 }
 ```
 
-Print as a tidy block. Truncate description to ~500 chars; truncate comments to ~200 chars each.
+Print as a tidy block. Truncate description to ~500 chars; truncate comment bodies to ~200 chars each.
 
 ## list
 
@@ -147,10 +154,31 @@ Print as a one-line-per-issue table.
 
 ## Logging
 
-After every mutation (create / update only — not show / list), append one line to `docs/agent-evolution/RUN_LOG.md`. Use `>>` — **never overwrite the file**.
+After every mutation (create / update only — not show / list), write a
+**per-invocation audit shard**, not an append to one shared file. A single
+`RUN_LOG.md` serializes parallel sessions and produces merge conflicts the
+moment two `/<TRACKER>` invocations run at once; one file per invocation at a
+unique path never conflicts.
+
+```bash
+# CUSTOMIZE: point this at your own shard helper. It should write a uniquely
+# named file under docs/agent-evolution/runs/<UTC-date>/ — one per call.
+./scripts/runlog.sh append "<TRACKER> <subcommand>" "<identifier>" \
+  "<key=value pairs of what changed>"
+```
+
+Keep shard bodies PII-free (repo-relative paths only, no committer email, no
+home-dir absolutes) — they are committed to git history.
 
 ## Error handling
 
 - Missing `<TRACKER>_API_KEY` → abort with `Error: <TRACKER>_API_KEY not set in environment.`
-- Tracker API error → abort with the verbatim error message.
-- Unknown subcommand → print usage, exit non-zero.
+- Tracker API error → abort with the verbatim error message from the response.
+- Unknown subcommand → print the subcommand table above as usage, exit non-zero.
+- `create-*` without a title → abort with usage.
+
+## Output style
+
+- One ✅ / ❌ line per top-level result.
+- For multi-step operations (resolve → mutate), emit a brief progress line per step.
+- Don't print raw API responses unless `--verbose` is in `$ARGUMENTS`.

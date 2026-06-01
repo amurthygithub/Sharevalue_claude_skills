@@ -6,7 +6,7 @@ it a day" at 3pm because the host clock says it's 22:00 UTC.
 Every time you send a prompt, the hook prepends one line of context:
 
 ```
-[user-local-time PT: 2026-05-23 21:32 PDT (Saturday)]
+[user-local-time local: 2025-06-15 09:32 (Sunday)]
 ```
 
 The agent sees that on every turn and can stop guessing what timezone you
@@ -46,7 +46,7 @@ it doesn't exist):
         "hooks": [
           {
             "type": "command",
-            "command": "printf '[user-local-time PT: %s]\\n' \"$(TZ=America/Los_Angeles date '+%Y-%m-%d %H:%M %Z (%A)' 2>/dev/null || echo unavailable)\""
+            "command": "printf '[user-local-time local: %s]\\n' \"$(TZ=<YOUR_IANA_TZ> date '+%Y-%m-%d %H:%M %Z (%A)' 2>/dev/null || echo unavailable)\""
           }
         ]
       }
@@ -60,8 +60,8 @@ teammates: put the same block in `~/.claude/settings.json` instead.
 
 ### 2. Change `TZ` and the label to your timezone
 
-Replace `America/Los_Angeles` with your IANA timezone and `PT` with
-whatever label reads well in context:
+Replace `<YOUR_IANA_TZ>` with your IANA timezone and `local` with
+whatever label reads well in context (e.g. `PT`, `ET`, `IST`):
 
 | Where you are | `TZ` value                  | Label  |
 | ------------- | --------------------------- | ------ |
@@ -125,10 +125,10 @@ prepended on the way to the agent.
 You can confirm the hook is firing by running the command directly:
 
 ```bash
-TZ=America/Los_Angeles date '+%Y-%m-%d %H:%M %Z (%A)'
+TZ=<YOUR_IANA_TZ> date '+%Y-%m-%d %H:%M %Z (%A)'
 ```
 
-That should print a string like `2026-05-23 21:32 PDT (Saturday)`. If
+That should print a string like `2025-06-15 09:32 <ZONE> (Sunday)`. If
 that works, the hook works.
 
 ## How it works (mechanics)
@@ -143,7 +143,7 @@ that works, the hook works.
   touching the host's `/etc/localtime`.
 - **Failure mode:** if `date` is unavailable (rare — minimal containers,
   busted PATH), the `|| echo unavailable` fallback emits
-  `[user-local-time PT: unavailable]` instead of an empty tag. The hook
+  `[user-local-time local: unavailable]` instead of an empty tag. The hook
   never errors the prompt.
 
 ## Limits and gotchas

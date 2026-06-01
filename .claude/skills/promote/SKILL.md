@@ -1,7 +1,7 @@
 ---
 name: promote
 description: Promote <STAGING_BRANCH> → <DEFAULT_BRANCH> (production). USER-INVOKED ONLY. Opens a promote PR, posts a "promotion ready" digest, and waits for the user's explicit confirmation before merging. Tags + drafts a release on merge.
-argument-hint: '[--cherry-pick PR1,PR2,...] [--skip-soak] [--message "..."]'
+argument-hint: '[--cherry-pick PR1,PR2,...] [--skip-soak] [--message "..."] [--major|--minor]'
 allowed-tools: Bash, Read, Write
 user-invocable: true
 disable-model-invocation: true
@@ -16,7 +16,7 @@ You are promoting changes from `<STAGING_BRANCH>` to `<DEFAULT_BRANCH>` (product
 | Flag | Meaning |
 |---|---|
 | `--cherry-pick PR1,PR2,...` | Curate a branch off `<DEFAULT_BRANCH>` with only those PRs cherry-picked. |
-| `--skip-soak` | Skip the "has staging soaked >24h" advisory. |
+| `--skip-soak` | Skip the "has staging soaked >24h" advisory (user accepts urgent risk). |
 | `--message "..."` | Override default PR title. |
 | `--major` / `--minor` | Override default patch version bump. |
 
@@ -31,16 +31,30 @@ git rev-parse origin/<STAGING_BRANCH> >/dev/null
 ## Step 2 — Compute the promotion set
 
 ```bash
-git log --no-merges --pretty='%h %s' origin/<DEFAULT_BRANCH>..origin/<STAGING_BRANCH> > /tmp/promote-commits.txt
+# Commits on staging not yet on main, chronological. %B captures the full
+# body (not just the subject) so ticket refs that live in `Refs:` footers —
+# not always echoed into the squash-merge subject — stay reachable for the
+# Done-marking step.
+git log --no-merges --pretty='%h %B' origin/<DEFAULT_BRANCH>..origin/<STAGING_BRANCH> > /tmp/promote-commits.txt
 gh pr list --state merged --base <STAGING_BRANCH> --limit 50 --json number,title,mergedAt,mergeCommit \
   --jq '.[] | "\(.number)\t\(.mergedAt)\t\(.title)"' > /tmp/promote-prs.txt
 ```
 
-Print a structured digest of: commits ahead, PRs merged (newest first), files touched (top-20 by churn), danger-zone touches.
+Print a structured digest of: commits ahead, PRs merged (newest first), files
+touched (top-20 by churn), and **danger-zone touches**.
+
+The danger-zone section uses the same `<DANGER_PATHS_REGEX>` as
+`.claude/skills/ship/SKILL.md` (see CLAUDE.md §9.2). For `/promote` this is
+**informational** — the human gate at Step 4 is the enforcement point. Surface
+the hits so the user can weigh them before typing `yes`.
+
+For `--cherry-pick PR1,PR2`, reduce the set to just those PRs' merge commits.
 
 ## Step 3 — Soak window check (advisory, not blocking)
 
-If the oldest unpromoted PR's `mergedAt` is less than 24 h ago, print a soak warning. `--skip-soak` overrides.
+If the oldest unpromoted PR's `mergedAt` is less than 24 h ago, print a soak
+warning (the convention lets nightly/scheduled jobs run a full cycle on staging
+before prod). `--skip-soak` overrides.
 
 ## Step 4 — Surface and PAUSE FOR USER CONFIRMATION
 
@@ -55,7 +69,15 @@ If the oldest unpromoted PR's `mergedAt` is less than 24 h ago, print a soak war
 Type 'yes' to open the promote PR. Anything else aborts.
 ```
 
-**Wait for an explicit `yes` (or equivalent). Do NOT proceed without it.**
+**Wait for an explicit, present-tense `yes`. Do NOT proceed without it.** If
+your runtime blocks interactive input when `disable-model-invocation: true`,
+print:
+
+```
+🛑 /promote needs interactive confirmation. Re-run from your terminal session, not from a sub-agent.
+```
+
+and exit.
 
 ## Step 5 — Build the promotion branch
 
@@ -66,7 +88,8 @@ git merge --no-ff --no-edit origin/<STAGING_BRANCH>
 git push -u origin "$PROMO_BRANCH"
 ```
 
-For `--cherry-pick`, cherry-pick each PR's merge commit individually.
+For `--cherry-pick`, cherry-pick each PR's merge commit individually; abort and
+surface on the first conflict.
 
 ## Step 6 — Open the promote PR
 
@@ -74,7 +97,7 @@ For `--cherry-pick`, cherry-pick each PR's merge commit individually.
 gh pr create \
   --base <DEFAULT_BRANCH> \
   --head "$PROMO_BRANCH" \
-  --title "$(date +%Y-%m-%d) promote: <message-or-summary>" \
+  --title "chore(infra): promote staging to main $(date +%Y-%m-%d) (<short summary>)" \
   --body "$(cat <<EOF
 ## Promotion: <STAGING_BRANCH> → <DEFAULT_BRANCH>
 
@@ -114,6 +137,8 @@ gh pr checks "$PROMO_PR" --watch --interval 30 --fail-fast || {
 
 ```
 ✅ Promote PR #$PROMO_PR ready to merge.
+   CI: green
+   URL: <pr-url>
 
 Type 'ship' to merge to <DEFAULT_BRANCH> and trigger prod deploy. Anything else aborts.
 ```
@@ -121,12 +146,26 @@ Type 'ship' to merge to <DEFAULT_BRANCH> and trigger prod deploy. Anything else 
 **Wait for `ship`** (or equivalent positive). On confirmation:
 
 ```bash
-gh pr merge "$PROMO_PR" --admin --squash --delete-branch
+# Use --merge (not --squash) so staging's commits become reachable from
+# <DEFAULT_BRANCH> via the merge commit's second-parent line. Squashing N
+# commits into 1 leaves staging permanently counted "N commits ahead" in the
+# GitHub UI, which compounds across promote cycles. The promo branch already
+# has staging merged into it (Step 5), so <DEFAULT_BRANCH> transitively
+# reaches staging-tip after this merge; Step 9.5 then pulls back to converge.
+gh pr merge "$PROMO_PR" --admin --merge --delete-branch
 ```
+
+If your runtime blocks input here, print the merge command for the user to run
+themselves and exit. **Never auto-merge to production.**
 
 ## Step 9 — Tag + draft GitHub release
 
+Patch bump is the default; `--major` / `--minor` override. Tags are
+`vMAJOR.MINOR.PATCH`.
+
 ```bash
+# Refresh origin before computing the bump and tagging — otherwise the tag
+# could land on a stale ref and miss the just-merged commit.
 git fetch origin <DEFAULT_BRANCH> --quiet
 LAST_TAG=$(git describe --tags --abbrev=0 origin/<DEFAULT_BRANCH> 2>/dev/null || echo "v0.0.0")
 VERSION="${LAST_TAG#v}"
@@ -150,13 +189,68 @@ gh release create "$NEW_TAG" \
   --draft
 ```
 
+The release is left as a **draft** — finalize it after the soak window confirms
+prod is healthy.
+
+## Step 9.5 — Merge <DEFAULT_BRANCH> back into <STAGING_BRANCH> (graph convergence)
+
+After the production merge + tag land, merge back so the GitHub UI shows
+0 ahead / 0 behind. Without this, the next `/promote` re-conflicts on
+already-merged content for no benefit.
+
+```bash
+git fetch origin <DEFAULT_BRANCH> --quiet
+# -B creates-or-resets the local branch from origin — avoids a pathspec error
+# on a fresh checkout that never had <STAGING_BRANCH> checked out locally.
+git checkout -B <STAGING_BRANCH> origin/<STAGING_BRANCH>
+# Strip anything outside [A-Za-z0-9._-] before splicing $NEW_TAG into the
+# commit subject — defensive against a corrupt tag injecting shell-active text.
+SAFE_TAG="${NEW_TAG//[^A-Za-z0-9._-]/}"
+# CUSTOMIZE: derive the promoted ticket list for the Refs footer below, e.g.
+#   PROMOTED_TICKETS=$(grep -oE '<TRACKER_TEAM_KEY>-[0-9]+' /tmp/promote-commits.txt \
+#     | sort -u | tr '\n' ',' | sed 's/,$//; s/,/, /g')
+# The subject MUST use a Conventional Commits type — `chore(infra):` fits.
+# A `Merge:` subject is rejected by the conventional-commits hook (merge isn't
+# an allowed type), so it dies before any ticket-ref hook runs.
+git merge --no-ff origin/<DEFAULT_BRANCH> -m "$(cat <<EOF
+chore(infra): merge <DEFAULT_BRANCH> back into <STAGING_BRANCH> post $SAFE_TAG promote
+
+No content changes — reconciles graph divergence after the promote so the
+GitHub UI shows 0 ahead / 0 behind and the next /promote won't re-conflict.
+
+Refs: <PROMOTED_TICKETS>
+EOF
+)"
+git push origin <STAGING_BRANCH>
+```
+
+If branch protection blocks the direct push (e.g. "Required reviews"), surface
+the error and continue — this convergence merge is nice-to-have, not blocking.
+
 ## Step 10 — Update tracker: tickets → Done
 
-For every `Refs: <TRACKER_TEAM_KEY>-NNN` footer in the merged commits, mark the ticket Done via `/linear update <id> status:Done` (or your tracker's equivalent).
+For every `Refs: <TRACKER_TEAM_KEY>-NNN` footer in the merged commits, mark the
+ticket Done via `/linear update <id> status:Done` (or inline a tracker mutation
+against `<TRACKER_STATE_DONE_UUID>`).
 
 ## Step 11 — Post-deploy verification (best-effort)
 
-Curl 2-3 critical public endpoints with appropriate bypass headers and verify response codes / cache headers. Surface anomalies as warnings — do NOT roll back automatically.
+```bash
+# CUSTOMIZE: probe 2-3 critical public routes on <PROD_DOMAIN> and assert
+# response codes / cache headers. Surface anomalies as WARNINGS — never roll
+# back automatically. Example skeleton:
+#
+#   for path in / /health /api/<critical-public-route>; do
+#     code=$(curl -s -o /dev/null -w '%{http_code}' "https://<PROD_DOMAIN>${path}")
+#     [ "$code" = "200" ] || echo "🟡 ${path} returned ${code} — investigate"
+#   done
+#
+# Note: a vendor-fronted prod (CDN / bot-mitigation / WAF) may serve different
+# cache headers to plain curl than to a real browser. If header assertions are
+# load-bearing, prefer (a) a CI-time test that imports your framework's header
+# config and asserts per-route resolution, plus (b) a headless-browser probe
+# against live prod. Keep both in sync.
+```
 
 ## Step 12 — Final report
 
@@ -172,14 +266,19 @@ Release:    <draft url — finalize when soak complete>
 Soak window: monitor observability for 30 min.
 ```
 
-## Step 13 — Append to RUN_LOG
+## Step 13 — Append to the run log
+
+Write a per-invocation shard rather than appending to a single shared file —
+parallel sessions then never conflict on the audit trail.
 
 ```bash
-echo "<ISO UTC> | /promote | done | tag=$NEW_TAG | promo_pr=$PROMO_PR | tickets=<list>" \
-  >> docs/agent-evolution/RUN_LOG.md
+# CUSTOMIZE: point at your own run-log helper. Shards live under a dated dir,
+# e.g. docs/agent-evolution/runs/<UTC-date>/, and are committed to git.
+./scripts/runlog.sh append promote "-" \
+  "done | tag=$NEW_TAG | promo_pr=$PROMO_PR | tickets=<list> | verify=<ok|warning>"
 ```
 
-## What `/promote` HALTS on (no auto-merge)
+## What `/promote` HALTS on (no auto-merge to production)
 
 - User did not type `yes` at Step 4.
 - CI failed at Step 7.
@@ -189,6 +288,6 @@ echo "<ISO UTC> | /promote | done | tag=$NEW_TAG | promo_pr=$PROMO_PR | tickets=
 ## What `/promote` does NOT do
 
 - Does not auto-fire from any other skill or hook.
-- Does not run from a non-interactive shell.
+- Does not run from a non-interactive shell (the confirmation gates require interactive input).
 - Does not skip the user-confirmation gates regardless of flags.
 - Does not roll back automatically — user calls `gh pr revert` if prod is bad.

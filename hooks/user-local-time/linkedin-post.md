@@ -8,7 +8,7 @@ it is for you, and will suggest you stop working at the wrong hour.
 Fix: a `UserPromptSubmit` hook in `.claude/settings.json` that prepends
 one line to every prompt:
 
-`[user-local-time PT: 2026-05-23 21:32 PDT (Saturday)]`
+`[user-local-time local: 2025-06-15 09:32 (Sunday)]`
 
 Pair it with a memory entry stating your working hours. Set 00:00–24:00
 if you don't want shutdown suggestions at all.

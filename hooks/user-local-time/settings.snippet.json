@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "printf '[user-local-time PT: %s]\\n' \"$(TZ=America/Los_Angeles date '+%Y-%m-%d %H:%M %Z (%A)' 2>/dev/null || echo unavailable)\""
+            "command": "printf '[user-local-time local: %s]\\n' \"$(TZ=<YOUR_IANA_TZ> date '+%Y-%m-%d %H:%M %Z (%A)' 2>/dev/null || echo unavailable)\""
           }
         ]
       }
